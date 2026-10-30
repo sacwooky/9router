@@ -4,6 +4,7 @@ import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLock
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
 import { getAntigravityQuotaCache, getAntigravityModelQuota } from "./antigravityQuota.js";
+import { isForbiddenBillingLane } from "@/shared/constants/billingLane.js";
 import * as log from "../utils/logger.js";
 
 // Mutex to prevent race conditions during account selection
@@ -26,6 +27,13 @@ function githubMonthlyResetMs(status, errorText, provider) {
  * @param {string|null} model - Model name for per-model rate limit filtering
  */
 export async function getProviderCredentials(provider, excludeConnectionIds = null, model = null, options = {}) {
+  // FluxLabs billing-lane guard: every billable path selects credentials here,
+  // so a forbidden lane is refused before any connection is looked up.
+  if (isForbiddenBillingLane(resolveProviderId(provider), model)) {
+    log.warn("AUTH", `billing-lane guard: refused ${provider}/${model}`);
+    return null;
+  }
+
   // Normalize to Set for consistent handling
   const excludeSet = excludeConnectionIds instanceof Set
     ? excludeConnectionIds

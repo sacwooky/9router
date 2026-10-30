@@ -28,6 +28,8 @@ import { getProjectIdForConnection } from "open-sse/services/projectId.js";
 import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
 import { getKeyAccessContext, enforceKeyAccess, filterAdapterModels } from "../services/keyAccess.js";
 import { resolveSmartChoice } from "../services/systemoneRouter.js";
+import { isForbiddenBillingLane, billingLaneDeniedMessage } from "@/shared/constants/billingLane.js";
+import { resolveProviderId } from "@/shared/constants/providers.js";
 
 /**
  * Handle chat completion request
@@ -264,6 +266,13 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   }
 
   const { provider, model } = modelInfo;
+
+  // FluxLabs billing-lane guard. auth.js refuses these too; this answers the
+  // client with the reason instead of "no active credentials".
+  if (isForbiddenBillingLane(resolveProviderId(provider), model)) {
+    log.warn("CHAT", `billing-lane guard: refused ${provider}/${model}`);
+    return errorResponse(HTTP_STATUS.FORBIDDEN, billingLaneDeniedMessage(model));
+  }
 
   // Routing shown in the unified "▶" line (client model → provider/model)
 
