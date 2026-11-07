@@ -59,6 +59,78 @@ export async function getClaudeUsage(accessToken, proxyOptions = null, options =
   return promise;
 }
 
+/**
+ * Map Anthropic's OAuth usage reply to 9router quotas. Exported for tests.
+ */
+export function parseClaudeOAuthUsage(data) {
+  const quotas = {};
+
+  // utilization = % USED (e.g. 87 means 87% used, 13% remaining)
+  const hasUtilization = (window) =>
+    window && typeof window === "object" && typeof window.utilization === "number";
+
+  const createQuotaObject = (window) => {
+    const used = window.utilization;
+    const remaining = Math.max(0, 100 - used);
+    return {
+      used,
+      total: 100,
+      remaining,
+      remainingPercentage: remaining,
+      resetAt: parseResetTime(window.resets_at),
+      unlimited: false,
+    };
+  };
+
+  if (hasUtilization(data.five_hour)) {
+    quotas["session (5h)"] = createQuotaObject(data.five_hour);
+  }
+
+  if (hasUtilization(data.seven_day)) {
+    quotas["weekly (7d)"] = createQuotaObject(data.seven_day);
+  }
+
+  // Parse model-specific weekly windows (e.g. seven_day_sonnet, seven_day_opus)
+  for (const [key, value] of Object.entries(data)) {
+    if (key.startsWith("seven_day_") && key !== "seven_day" && hasUtilization(value)) {
+      const modelName = key.replace("seven_day_", "");
+      quotas[`weekly ${modelName} (7d)`] = createQuotaObject(value);
+    }
+  }
+
+  // Model-scoped weekly limits (e.g. Fable) arrive in limits[], not as
+  // seven_day_* keys: { kind: "weekly_scoped", percent, resets_at,
+  // scope: { model: { display_name: "Fable" } } }. No limits entry means
+  // the account has no such window — omit the row, never fabricate one.
+  if (Array.isArray(data.limits)) {
+    for (const limit of data.limits) {
+      // The server's 5-hour meter as a limits[] row ({ kind: "session", group: "session", percent, resets_at }), the
+      // kind Claude Code itself reads. Used only when five_hour gave none, so the two never disagree in one reply.
+      if (limit?.kind === "session" && !quotas["session (5h)"] && typeof limit.percent === "number") {
+        quotas["session (5h)"] = createQuotaObject({
+          utilization: Math.max(0, Math.min(100, limit.percent)),
+          resets_at: limit.resets_at,
+        });
+        continue;
+      }
+      if (limit?.kind !== "weekly_scoped") continue;
+      const modelName = String(limit?.scope?.model?.display_name || "").trim().toLowerCase();
+      if (!modelName || typeof limit.percent !== "number") continue;
+      quotas[`weekly ${modelName} (7d)`] = createQuotaObject({
+        utilization: Math.max(0, Math.min(100, limit.percent)),
+        resets_at: limit.resets_at,
+      });
+    }
+  }
+
+  return {
+    plan: "Claude Code",
+    extraUsage: data.extra_usage ?? null,
+    resetCredits: parseClaudeResetGrants(data.cedar_ember),
+    quotas,
+  };
+}
+
 async function fetchClaudeUsageRaw(accessToken, proxyOptions = null) {
   try {
     // Skip OAuth usage call while this token is cooling down from a recent 429
@@ -80,64 +152,7 @@ async function fetchClaudeUsageRaw(accessToken, proxyOptions = null) {
     }, proxyOptions);
 
     if (oauthResponse.ok) {
-      const data = await oauthResponse.json();
-      const quotas = {};
-
-      // utilization = % USED (e.g. 87 means 87% used, 13% remaining)
-      const hasUtilization = (window) =>
-        window && typeof window === "object" && typeof window.utilization === "number";
-
-      const createQuotaObject = (window) => {
-        const used = window.utilization;
-        const remaining = Math.max(0, 100 - used);
-        return {
-          used,
-          total: 100,
-          remaining,
-          remainingPercentage: remaining,
-          resetAt: parseResetTime(window.resets_at),
-          unlimited: false,
-        };
-      };
-
-      if (hasUtilization(data.five_hour)) {
-        quotas["session (5h)"] = createQuotaObject(data.five_hour);
-      }
-
-      if (hasUtilization(data.seven_day)) {
-        quotas["weekly (7d)"] = createQuotaObject(data.seven_day);
-      }
-
-      // Parse model-specific weekly windows (e.g. seven_day_sonnet, seven_day_opus)
-      for (const [key, value] of Object.entries(data)) {
-        if (key.startsWith("seven_day_") && key !== "seven_day" && hasUtilization(value)) {
-          const modelName = key.replace("seven_day_", "");
-          quotas[`weekly ${modelName} (7d)`] = createQuotaObject(value);
-        }
-      }
-
-      // Model-scoped weekly limits (e.g. Fable) arrive in limits[], not as
-      // seven_day_* keys: { kind: "weekly_scoped", percent, resets_at,
-      // scope: { model: { display_name: "Fable" } } }. No limits entry means
-      // the account has no such window — omit the row, never fabricate one.
-      if (Array.isArray(data.limits)) {
-        for (const limit of data.limits) {
-          if (limit?.kind !== "weekly_scoped") continue;
-          const modelName = String(limit?.scope?.model?.display_name || "").trim().toLowerCase();
-          if (!modelName || typeof limit.percent !== "number") continue;
-          quotas[`weekly ${modelName} (7d)`] = createQuotaObject({
-            utilization: Math.max(0, Math.min(100, limit.percent)),
-            resets_at: limit.resets_at,
-          });
-        }
-      }
-
-      return {
-        plan: "Claude Code",
-        extraUsage: data.extra_usage ?? null,
-        resetCredits: parseClaudeResetGrants(data.cedar_ember),
-        quotas,
-      };
+      return parseClaudeOAuthUsage(await oauthResponse.json());
     }
 
     // Cool down OAuth usage polling after a 429 (quota endpoint only)
