@@ -1,0 +1,59 @@
+# FluxLabs PR CI for the patch series.
+#
+# The upstream workflows in this directory publish releases (Docker Hub, GitBook, tray
+# binaries); none of them tests a pull request. This one runs, on every PR into a
+# fluxlabs/* branch, the vitest files the FluxLabs patch series adds or changes relative
+# to the release tag it sits on. The list is derived from the diff, so a new patch's
+# tests are picked up without editing this file. An empty list is a failure: a patch
+# series with no tests has nothing to show green.
+name: fluxlabs-patch-tests
+
+on:
+  pull_request:
+    branches: ["fluxlabs/**"]
+  push:
+    branches: ["fluxlabs/patches"]
+
+permissions:
+  contents: read
+
+jobs:
+  patch-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+
+      - name: List the patch series' test files
+        id: list
+        run: |
+          set -euo pipefail
+          base="$(git describe --tags --abbrev=0 --match 'v*' HEAD)"
+          echo "release tag: $base"
+          git diff --name-only --diff-filter=AMR "$base" HEAD -- 'tests/*.test.js' 'tests/**/*.test.js' \
+            | sed 's#^tests/##' > "$RUNNER_TEMP/patch-tests.txt"
+          cat "$RUNNER_TEMP/patch-tests.txt"
+          if [ ! -s "$RUNNER_TEMP/patch-tests.txt" ]; then
+            echo "::error::no test files changed since $base; nothing to run"
+            exit 1
+          fi
+
+      # tests/ needs --legacy-peer-deps: npm 10's arborist crashes resolving vitest 4's
+      # peer set ("Cannot read properties of null (reading 'edgesOut')").
+      - name: Install dependencies
+        run: |
+          npm install --ignore-scripts --no-audit --no-fund
+          npm --prefix tests install --legacy-peer-deps --no-audit --no-fund
+
+      - name: Run the patch series' tests
+        working-directory: tests
+        run: |
+          set -euo pipefail
+          mapfile -t files < "$RUNNER_TEMP/patch-tests.txt"
+          npx vitest run --reporter=verbose "${files[@]}"
