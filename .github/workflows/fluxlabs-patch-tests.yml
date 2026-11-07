@@ -34,6 +34,10 @@ jobs:
         id: list
         run: |
           set -euo pipefail
+          # The fork does not carry upstream's release tags (its newest is far older), so
+          # describe would land on a stale tag and list hundreds of upstream tests. Fetch
+          # the release tags from upstream, the same source the fleet updater builds from.
+          git fetch --quiet --force https://github.com/decolua/9router.git 'refs/tags/v*:refs/tags/v*'
           base="$(git describe --tags --abbrev=0 --match 'v*' HEAD)"
           echo "release tag: $base"
           git diff --name-only --diff-filter=AMR "$base" HEAD -- 'tests/*.test.js' 'tests/**/*.test.js' \
